@@ -55,10 +55,10 @@ async function initDb() {
     last_name TEXT,
     address TEXT,
     position TEXT,
-    contact TEXT UNIQUE,
+    contact TEXT,
     dob TEXT,
     blood_group TEXT,
-    email TEXT UNIQUE,
+    email TEXT,
     dept TEXT,
     other TEXT,
     photo_path TEXT,
@@ -127,7 +127,7 @@ function getBaseUrl(req) {
 
 // === API Endpoints ===
 
-// ➕ Add new employee (with duplicate check)
+// ➕ Add new employee (with strong duplicate check)
 app.post("/api/employees", upload.single("photo"), async (req, res) => {
   try {
     const payload = req.body || {};
@@ -144,28 +144,49 @@ app.post("/api/employees", upload.single("photo"), async (req, res) => {
       other = ""
     } = payload;
 
-    // Duplicate check
-    const existing = await db.get(
-      `SELECT * FROM employees WHERE email = ? OR contact = ?`,
-      [email, contact]
+    // ---- Duplicate Check ----
+    const duplicate = await db.get(
+      `SELECT * FROM employees 
+       WHERE email = ? 
+          OR contact = ? 
+          OR (LOWER(first_name) = LOWER(?) AND LOWER(last_name) = LOWER(?) AND dob = ?)`,
+      [email, contact, first_name, last_name, dob]
     );
-    if (existing) {
+
+    if (duplicate) {
       return res.status(400).json({
         success: false,
-        error: "Employee with the same email or contact already exists!"
+        error:
+          "Duplicate employee detected! Same email, contact, or name with DOB already exists."
       });
     }
 
+    // ---- Generate ID ----
     const employee_id = await generateEmployeeId({ dept });
     const created_at = new Date().toISOString();
 
+    // ---- Save photo ----
     let photo_path = null;
     if (req.file && req.file.filename) photo_path = `/uploads/${req.file.filename}`;
 
     await db.run(
       `INSERT INTO employees (employee_id, first_name, last_name, address, position, contact, dob, blood_group, email, dept, other, photo_path, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [employee_id, first_name, last_name, address, position, contact, dob, blood_group, email, dept, other, photo_path, created_at]
+      [
+        employee_id,
+        first_name,
+        last_name,
+        address,
+        position,
+        contact,
+        dob,
+        blood_group,
+        email,
+        dept,
+        other,
+        photo_path,
+        created_at
+      ]
     );
 
     const saved = await db.get("SELECT * FROM employees WHERE employee_id = ?", [employee_id]);
