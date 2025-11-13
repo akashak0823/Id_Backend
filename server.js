@@ -55,10 +55,10 @@ async function initDb() {
     last_name TEXT,
     address TEXT,
     position TEXT,
-    contact TEXT,
+    contact TEXT UNIQUE,
     dob TEXT,
     blood_group TEXT,
-    email TEXT,
+    email TEXT UNIQUE,
     dept TEXT,
     other TEXT,
     photo_path TEXT,
@@ -127,7 +127,7 @@ function getBaseUrl(req) {
 
 // === API Endpoints ===
 
-// ➕ Add new employee
+// ➕ Add new employee (with duplicate check)
 app.post("/api/employees", upload.single("photo"), async (req, res) => {
   try {
     const payload = req.body || {};
@@ -143,6 +143,18 @@ app.post("/api/employees", upload.single("photo"), async (req, res) => {
       dept = "",
       other = ""
     } = payload;
+
+    // Duplicate check
+    const existing = await db.get(
+      `SELECT * FROM employees WHERE email = ? OR contact = ?`,
+      [email, contact]
+    );
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        error: "Employee with the same email or contact already exists!"
+      });
+    }
 
     const employee_id = await generateEmployeeId({ dept });
     const created_at = new Date().toISOString();
@@ -197,7 +209,7 @@ app.get("/api/employees/:employee_id", async (req, res) => {
   }
 });
 
-// 🌐 Public verification page (scanned QR opens this)
+// 🌐 Public verification page
 app.get("/verify/:employee_id", async (req, res) => {
   const eid = req.params.employee_id;
   const row = await db.get("SELECT * FROM employees WHERE employee_id = ?", [eid]);
