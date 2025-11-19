@@ -276,6 +276,122 @@ app.post("/api/employees", upload.single("photo"), async (req, res) => {
   }
 });
 
+// Update employee (PUT)
+// Accepts multipart/form-data with optional "photo" file OR JSON/form data with photoUrl
+app.put("/api/employees/:employee_id", upload.single("photo"), async (req, res) => {
+  try {
+    const eid = req.params.employee_id;
+    const existing = await Employee.findOne({ employee_id: eid });
+    if (!existing) return res.status(404).json({ success: false, error: "Not found" });
+
+    // normalize incoming fields
+    const payload = req.body || {};
+    const {
+      first_name = existing.first_name,
+      last_name = existing.last_name,
+      address = existing.address,
+      position = existing.position,
+      contact = existing.contact,
+      dob = existing.dob,
+      blood_group = existing.blood_group,
+      email = existing.email,
+      dept = existing.dept,
+      other = existing.other,
+      photoUrl = "" // client-provided URL (if any)
+    } = payload;
+
+    // Basic validation
+    if (!first_name || !last_name) {
+      return res.status(400).json({ success: false, error: "first_name and last_name are required" });
+    }
+
+    // Duplicate check excluding current record
+    const duplicate = await Employee.findOne({
+      _id: { $ne: existing._id },
+      $or: [
+        { email: email || null },
+        { contact: contact || null },
+        { $and: [
+            { first_name: { $regex: `^${escapeRegExp(first_name)}$`, $options: "i" } },
+            { last_name: { $regex: `^${escapeRegExp(last_name)}$`, $options: "i" } },
+            { dob: dob || null }
+          ] }
+      ]
+    }).lean();
+
+    if (duplicate) {
+      return res.status(400).json({ success: false, error: "Duplicate employee detected! Same email, contact, or name with DOB already exists." });
+    }
+
+    // Photo handling:
+    // - If new file uploaded (req.file) -> upload it and delete old server-uploaded image (if any)
+    // - Else if photoUrl provided and it's different from existing.photo_url -> if existing was server-uploaded, delete old public_id
+    // - Else keep existing photo data
+    let photo_url = existing.photo_url || null;
+    let photo_public_id = existing.photo_public_id || null;
+
+    if (req.file && req.file.buffer) {
+      // upload new image
+      try {
+        const result = await uploadBufferToCloudinary(req.file.buffer, req.file.originalname);
+        // delete previous server-uploaded image if present
+        if (photo_public_id) {
+          await deleteCloudinaryImage(photo_public_id);
+        }
+        photo_public_id = result.public_id;
+        photo_url = result.secure_url;
+      } catch (err) {
+        console.error("Cloudinary upload failed:", err);
+        return res.status(500).json({ success: false, error: "Image upload failed", details: String(err) });
+      }
+    } else if (photoUrl) {
+      // client provided an external URL (or a Cloudinary URL already); if it differs from existing and previous was server-uploaded, remove old
+      if (photoUrl !== photo_url) {
+        if (photo_public_id) {
+          await deleteCloudinaryImage(photo_public_id);
+        }
+        photo_public_id = null;
+        photo_url = photoUrl;
+      }
+      // else no change
+    }
+
+    // Update fields (do not allow changing employee_id here)
+    existing.first_name = first_name;
+    existing.last_name = last_name;
+    existing.address = address;
+    existing.position = position;
+    existing.contact = contact;
+    existing.dob = dob;
+    existing.blood_group = blood_group;
+    existing.email = email;
+    existing.dept = dept;
+    existing.other = other;
+    existing.photo_public_id = photo_public_id;
+    existing.photo_url = photo_url;
+
+    await existing.save();
+
+    const verifyUrl = `${getBaseUrl(req)}/verify/${encodeURIComponent(existing.employee_id)}`;
+    const [qrDataUrl, barcodeDataUrl] = await Promise.all([
+      makeQRDataURL(verifyUrl),
+      makeBarcodeDataURL(existing.employee_id)
+    ]);
+
+    res.json({
+      success: true,
+      employee: existing,
+      qrDataUrl,
+      barcodeDataUrl,
+      verifyUrl,
+      photoUrl: existing.photo_url || null
+    });
+  } catch (err) {
+    console.error("PUT /api/employees/:id error:", err);
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+
 // List employees (search q, limit, offset)
 app.get("/api/employees", async (req, res) => {
   try {
