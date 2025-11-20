@@ -16,8 +16,9 @@ dotenv.config();
 
 // App + config
 const app = express();
+// enable CORS (you can restrict origins later)
 app.use(cors());
-app.use(bodyParser.json({ limit: "4mb" }));
+app.use(bodyParser.json({ limit: "8mb" }));
 app.use(bodyParser.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 4000;
@@ -51,7 +52,7 @@ const employeeSchema = new mongoose.Schema({
   dept: String,
   other: String,
   photo_public_id: String, // Cloudinary public_id (if uploaded by server)
-  photo_url: String,       // public URL (secure_url)
+  photo_url: String,       // public URL (secure_url or external)
   created_at: { type: Date, default: Date.now }
 }, { versionKey: false });
 
@@ -119,6 +120,11 @@ async function makeQRDataURL(text) {
   return await QRCode.toDataURL(text, { errorCorrectionLevel: "M", type: "image/png" });
 }
 
+async function makeQRCodeBuffer(text) {
+  // return Node buffer (binary PNG)
+  return await QRCode.toBuffer(text, { errorCorrectionLevel: "M", type: "png" });
+}
+
 async function makeBarcodeDataURL(text) {
   const png = await bwipjs.toBuffer({
     bcid: "code128",
@@ -129,6 +135,18 @@ async function makeBarcodeDataURL(text) {
     textxalign: "center"
   });
   return `data:image/png;base64,${png.toString("base64")}`;
+}
+
+async function makeBarcodeBuffer(text) {
+  const png = await bwipjs.toBuffer({
+    bcid: "code128",
+    text,
+    scale: 3,
+    height: 12,
+    includetext: false,
+    textxalign: "center"
+  });
+  return png;
 }
 
 function getBaseUrl(req) {
@@ -297,7 +315,7 @@ app.put("/api/employees/:employee_id", upload.single("photo"), async (req, res) 
       email = existing.email,
       dept = existing.dept,
       other = existing.other,
-      photoUrl = "" // client-provided URL (if any)
+      photoUrl = "" // client-provided URL (if any). sentinel: "__DELETE__"
     } = payload;
 
     // Basic validation
@@ -325,6 +343,7 @@ app.put("/api/employees/:employee_id", upload.single("photo"), async (req, res) 
 
     // Photo handling:
     // - If new file uploaded (req.file) -> upload it and delete old server-uploaded image (if any)
+    // - Else if photoUrl === "__DELETE__" -> delete old server-uploaded image (if any) and clear photo fields
     // - Else if photoUrl provided and it's different from existing.photo_url -> if existing was server-uploaded, delete old public_id
     // - Else keep existing photo data
     let photo_url = existing.photo_url || null;
@@ -344,6 +363,13 @@ app.put("/api/employees/:employee_id", upload.single("photo"), async (req, res) 
         console.error("Cloudinary upload failed:", err);
         return res.status(500).json({ success: false, error: "Image upload failed", details: String(err) });
       }
+    } else if (photoUrl === "__DELETE__") {
+      // explicit delete request from client
+      if (photo_public_id) {
+        await deleteCloudinaryImage(photo_public_id);
+      }
+      photo_public_id = null;
+      photo_url = null;
     } else if (photoUrl) {
       // client provided an external URL (or a Cloudinary URL already); if it differs from existing and previous was server-uploaded, remove old
       if (photoUrl !== photo_url) {
@@ -436,7 +462,7 @@ app.get("/api/employees", async (req, res) => {
   }
 });
 
-// Get single employee
+// Get single employee (with data URLs for QR + barcode)
 app.get("/api/employees/:employee_id", async (req, res) => {
   try {
     const eid = req.params.employee_id;
@@ -444,13 +470,53 @@ app.get("/api/employees/:employee_id", async (req, res) => {
     if (!row) return res.status(404).json({ success: false, error: "Not found" });
 
     const photo_url = row.photo_url || null;
-    const qrDataUrl = await makeQRDataURL(`${getBaseUrl(req)}/verify/${eid}`);
-    const barcodeDataUrl = await makeBarcodeDataURL(row.employee_id);
+    const verifyUrl = `${getBaseUrl(req)}/verify/${eid}`;
+    const [qrDataUrl, barcodeDataUrl] = await Promise.all([
+      makeQRDataURL(verifyUrl),
+      makeBarcodeDataURL(row.employee_id)
+    ]);
 
-    res.json({ success: true, employee: { ...row, photo_url }, qrDataUrl, barcodeDataUrl });
+    res.json({ success: true, employee: { ...row, photo_url }, qrDataUrl, barcodeDataUrl, verifyUrl });
   } catch (err) {
     console.error("GET /api/employees/:id error:", err);
     res.status(500).json({ success: false, error: String(err) });
+  }
+});
+
+// Download QR (binary PNG) - Content-Disposition: attachment
+app.get("/api/employees/:employee_id/qr", async (req, res) => {
+  try {
+    const eid = req.params.employee_id;
+    const row = await Employee.findOne({ employee_id: eid }).lean();
+    if (!row) return res.status(404).send("Not found");
+
+    const verifyUrl = `${getBaseUrl(req)}/verify/${encodeURIComponent(eid)}`;
+    const buffer = await makeQRCodeBuffer(verifyUrl);
+
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Content-Disposition", `attachment; filename="${eid}-qr.png"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error("GET /api/employees/:id/qr error:", err);
+    res.status(500).send("Server error");
+  }
+});
+
+// Download Barcode (binary PNG) - Content-Disposition: attachment
+app.get("/api/employees/:employee_id/barcode", async (req, res) => {
+  try {
+    const eid = req.params.employee_id;
+    const row = await Employee.findOne({ employee_id: eid }).lean();
+    if (!row) return res.status(404).send("Not found");
+
+    const buffer = await makeBarcodeBuffer(row.employee_id);
+
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Content-Disposition", `attachment; filename="${eid}-barcode.png"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error("GET /api/employees/:id/barcode error:", err);
+    res.status(500).send("Server error");
   }
 });
 
