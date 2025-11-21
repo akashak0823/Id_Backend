@@ -550,31 +550,45 @@ app.get("/verify/:employee_id", async (req, res) => {
 
     const photo_url = row.photo_url || "";
 
-    const html = `
+   const html = `
     <html>
     <head>
       <title>${escapeHtml(row.first_name)} ${escapeHtml(row.last_name)} - ${COMPANY_CODE} Employee</title>
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <style>
-        body { font-family: 'Inter', sans-serif; background: #F1EFEC; color: #030303; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
-        .card { background:#fff; border-radius:16px; box-shadow:0 6px 18px rgba(0,0,0,0.1); padding:32px; width:360px; text-align:center; border-top:6px solid #123458; }
-        img.photo { width:160px; height:160px; object-fit:cover; border-radius:12px; border:4px solid #4ED7F1; margin-bottom:16px; }
-        h2{ margin:0; color:#123458; } .id{ font-family:'Roboto Mono', monospace; color:#D4C9BE; font-size:14px; margin-bottom:10px; }
-        p{ margin:6px 0; } hr{ margin:16px 0; border:none; border-top:1px solid #eee; } .brand{ margin-top:10px; font-weight:bold; color:#4ED7F1; letter-spacing:1px; }
+        body { font-family: 'Inter', sans-serif; background: #F1EFEC; color: #030303; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; padding:16px; }
+        .card { background:#fff; border-radius:16px; box-shadow:0 6px 18px rgba(0,0,0,0.1); padding:24px; width:360px; text-align:center; border-top:6px solid #123458; position:relative; }
+        .logo { width:84px; height:auto; margin:0 auto 12px auto; display:block; }
+        img.photo { width:160px; height:160px; object-fit:cover; border-radius:12px; border:4px solid #4ED7F1; margin:12px auto; display:block; }
+        h2{ margin:8px 0 0 0; color:#123458; font-size:20px; }
+        .id{ font-family:'Roboto Mono', monospace; color:#555; font-size:13px; margin:8px 0 12px 0; letter-spacing:0.6px; }
+        .meta { text-align:left; margin:8px 0; font-size:14px; color:#222; }
+        .meta strong { color:#333; }
+        .address { white-space: pre-wrap; word-break: break-word; text-align:left; max-height:120px; overflow:auto; background:#fafafa; padding:8px; border-radius:6px; border:1px solid #eee; color:#333; }
+        p{ margin:8px 0; }
+        hr{ margin:16px 0; border:none; border-top:1px solid #eee; }
+        .brand{ margin-top:10px; font-weight:bold; color:#4ED7F1; letter-spacing:1px; }
       </style>
     </head>
     <body>
       <div class="card">
+        ${logoUrl ? `<img src="${escapeHtml(logoUrl)}" class="logo" alt="${escapeHtml(COMPANY_CODE)} logo" />` : ""}
         ${photo_url ? `<img src="${photo_url}" class="photo" alt="Employee Photo"/>` : ""}
         <h2>${escapeHtml(row.first_name)} ${escapeHtml(row.last_name)}</h2>
         <div class="id">${escapeHtml(row.employee_id)}</div>
-        <p><strong>Position:</strong> ${escapeHtml(row.position || "-")}</p>
-        <p><strong>Department:</strong> ${escapeHtml(row.dept || "-")}</p>
-        <p><strong>Contact:</strong> ${escapeHtml(row.contact || "-")}</p>
-        <p><strong>Email:</strong> ${escapeHtml(row.email || "-")}</p>
-        <p><strong>DOB:</strong> ${escapeHtml(row.dob || "-")}</p>
-        <p><strong>Blood Group:</strong> ${escapeHtml(row.blood_group || "-")}</p>
-        <p><strong>Address:</strong> ${escapeHtml(row.address || "-")}</p>
+
+        <div class="meta"><strong>Position:</strong> ${escapeHtml(row.position || "-")}</div>
+        <div class="meta"><strong>Department:</strong> ${escapeHtml(row.dept || "-")}</div>
+        <div class="meta"><strong>Contact:</strong> ${escapeHtml(row.contact || "-")}</div>
+        <div class="meta"><strong>Email:</strong> ${escapeHtml(row.email || "-")}</div>
+        <div class="meta"><strong>DOB:</strong> ${escapeHtml(row.dob || "-")}</div>
+        <div class="meta"><strong>Blood Group:</strong> ${escapeHtml(row.blood_group || "-")}</div>
+
+        <div style="margin-top:8px;">
+          <div style="font-weight:600; text-align:left; margin-bottom:6px;">Address</div>
+          <div class="address">${safeAddress}</div>
+        </div>
+
         <hr />
         <div class="brand">Verified by ${escapeHtml(COMPANY_CODE)}</div>
       </div>
@@ -591,3 +605,4 @@ app.get("/verify/:employee_id", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ ID Card & QR Generator running on http://localhost:${PORT}`);
 });
+
