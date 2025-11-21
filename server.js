@@ -10,7 +10,6 @@ import mongoose from "mongoose";
 import cloudinary from "cloudinary";
 import streamifier from "streamifier";
 import dotenv from "dotenv";
-import path from "path";
 
 dotenv.config();
 
@@ -23,8 +22,17 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 4000;
 const COMPANY_CODE = process.env.COMPANY_CODE || "ART";
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://Akash:Akash0515@database.otmxfxp.mongodb.net/Rtech?retryWrites=true&w=majority&appName=Database";
+const MONGODB_URI = process.env.MONGODB_URI || ""; // set in env
 const CLOUDINARY_UPLOAD_FOLDER = process.env.CLOUDINARY_UPLOAD_FOLDER || "Artibots";
+
+// Validate required env at startup
+if (!MONGODB_URI) {
+  console.error("FATAL: MONGODB_URI is not set. Please set it in environment variables.");
+  process.exit(1);
+}
+if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+  console.warn("Warning: Cloudinary env vars are not fully set. Image upload endpoints will fail until configured.");
+}
 
 // Configure Cloudinary
 cloudinary.v2.config({
@@ -34,11 +42,7 @@ cloudinary.v2.config({
   secure: true
 });
 
-// Mongoose setup
-await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
-console.log("✅ Connected to MongoDB");
-
-// Employee schema
+// ---------- Mongoose schema & model ----------
 const employeeSchema = new mongoose.Schema({
   employee_id: { type: String, unique: true, index: true },
   first_name: String,
@@ -51,14 +55,14 @@ const employeeSchema = new mongoose.Schema({
   email: String,
   dept: String,
   other: String,
-  photo_public_id: String, // Cloudinary public_id (if uploaded by server)
-  photo_url: String,       // public URL (secure_url or external)
+  photo_public_id: String,
+  photo_url: String,
   created_at: { type: Date, default: Date.now }
 }, { versionKey: false });
 
 const Employee = mongoose.model("Employee", employeeSchema);
 
-// Multer memory storage for optional server-side uploads
+// ---------- Multer (memory) ----------
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 6 * 1024 * 1024 }, // 6 MB
@@ -100,12 +104,14 @@ async function generateEmployeeId({ dept }) {
   const yy = String(year).slice(-2);
   const dcode = deptCode(dept);
 
+  // find last for this pattern
   const regex = new RegExp(`^${COMPANY_CODE}-${yy}-${dcode}-\\d{6}-\\d$`);
   const last = await Employee.findOne({ employee_id: { $regex: regex } }).sort({ created_at: -1 }).lean();
 
   let lastSerial = 0;
   if (last && last.employee_id) {
     const parts = last.employee_id.split("-");
+    // parts: [COMPANY, YY, DCODE, SERIAL, CHK]
     lastSerial = parseInt(parts[3] || "0", 10) || 0;
   }
 
@@ -121,7 +127,6 @@ async function makeQRDataURL(text) {
 }
 
 async function makeQRCodeBuffer(text) {
-  // return Node buffer (binary PNG)
   return await QRCode.toBuffer(text, { errorCorrectionLevel: "M", type: "png" });
 }
 
@@ -155,7 +160,6 @@ function getBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
-// Upload buffer to Cloudinary; returns cloudinary result object
 function uploadBufferToCloudinary(buffer, originalName) {
   return new Promise((resolve, reject) => {
     const options = {
@@ -175,7 +179,6 @@ function uploadBufferToCloudinary(buffer, originalName) {
   });
 }
 
-// Delete image by public_id (if exists)
 async function deleteCloudinaryImage(public_id) {
   if (!public_id) return;
   try {
@@ -188,12 +191,8 @@ async function deleteCloudinaryImage(public_id) {
 // ---------- Routes ----------
 
 // Create employee
-// Accepts:
-// - multipart/form-data with optional file field "photo" (server uploads to Cloudinary)
-// - OR application/json / form-encoded with photoUrl in body (client uploaded to Cloudinary)
 app.post("/api/employees", upload.single("photo"), async (req, res) => {
   try {
-    // normalize incoming fields (req.body will contain text fields for both)
     const payload = req.body || {};
     const {
       first_name = "",
@@ -206,42 +205,43 @@ app.post("/api/employees", upload.single("photo"), async (req, res) => {
       email = "",
       dept = "",
       other = "",
-      photoUrl = "" // from client-side direct upload (if present)
+      photoUrl = ""
     } = payload;
 
     if (!first_name || !last_name) {
       return res.status(400).json({ success: false, error: "first_name and last_name are required" });
     }
 
-    // Duplicate check (email/contact or same name + dob)
-    const duplicate = await Employee.findOne({
-      $or: [
-        { email: email || null },
-        { contact: contact || null },
-        { $and: [
-            { first_name: { $regex: `^${escapeRegExp(first_name)}$`, $options: "i" } },
-            { last_name: { $regex: `^${escapeRegExp(last_name)}$`, $options: "i" } },
-            { dob: dob || null }
-          ] }
-      ]
-    }).lean();
+    // Build duplicate-check clauses only for non-empty inputs
+    const orClauses = [];
+    if (email && email.trim()) orClauses.push({ email: email.trim() });
+    if (contact && contact.trim()) orClauses.push({ contact: contact.trim() });
+    if (first_name && last_name && dob) {
+      orClauses.push({
+        $and: [
+          { first_name: { $regex: `^${escapeRegExp(first_name)}$`, $options: "i" } },
+          { last_name: { $regex: `^${escapeRegExp(last_name)}$`, $options: "i" } },
+          { dob }
+        ]
+      });
+    }
+
+    let duplicate = null;
+    if (orClauses.length > 0) {
+      duplicate = await Employee.findOne({ $or: orClauses }).lean();
+    }
 
     if (duplicate) {
       return res.status(400).json({ success: false, error: "Duplicate employee detected! Same email, contact, or name with DOB already exists." });
     }
 
-    // generate employee id
     const employee_id = await generateEmployeeId({ dept });
     const created_at = new Date();
 
-    // Photo handling priority:
-    // 1) If client provided photoUrl in body, prefer that (no server upload)
-    // 2) Else if client attached file 'photo' (multipart), server will upload to Cloudinary
     let photo_url = photoUrl || null;
     let photo_public_id = null;
 
     if (!photo_url && req.file && req.file.buffer) {
-      // server-side upload to Cloudinary
       try {
         const result = await uploadBufferToCloudinary(req.file.buffer, req.file.originalname);
         photo_public_id = result.public_id;
@@ -252,7 +252,6 @@ app.post("/api/employees", upload.single("photo"), async (req, res) => {
       }
     }
 
-    // save to MongoDB
     const doc = new Employee({
       employee_id,
       first_name,
@@ -272,7 +271,6 @@ app.post("/api/employees", upload.single("photo"), async (req, res) => {
 
     await doc.save();
 
-    // generate QR & barcode
     const verifyUrl = `${getBaseUrl(req)}/verify/${encodeURIComponent(employee_id)}`;
     const [qrDataUrl, barcodeDataUrl] = await Promise.all([
       makeQRDataURL(verifyUrl),
@@ -294,15 +292,13 @@ app.post("/api/employees", upload.single("photo"), async (req, res) => {
   }
 });
 
-// Update employee (PUT)
-// Accepts multipart/form-data with optional "photo" file OR JSON/form data with photoUrl
+// Update employee
 app.put("/api/employees/:employee_id", upload.single("photo"), async (req, res) => {
   try {
     const eid = req.params.employee_id;
     const existing = await Employee.findOne({ employee_id: eid });
     if (!existing) return res.status(404).json({ success: false, error: "Not found" });
 
-    // normalize incoming fields
     const payload = req.body || {};
     const {
       first_name = existing.first_name,
@@ -315,45 +311,44 @@ app.put("/api/employees/:employee_id", upload.single("photo"), async (req, res) 
       email = existing.email,
       dept = existing.dept,
       other = existing.other,
-      photoUrl = "" // client-provided URL (if any). sentinel: "__DELETE__"
+      photoUrl = ""
     } = payload;
 
-    // Basic validation
     if (!first_name || !last_name) {
       return res.status(400).json({ success: false, error: "first_name and last_name are required" });
     }
 
-    // Duplicate check excluding current record
-    const duplicate = await Employee.findOne({
-      _id: { $ne: existing._id },
-      $or: [
-        { email: email || null },
-        { contact: contact || null },
-        { $and: [
-            { first_name: { $regex: `^${escapeRegExp(first_name)}$`, $options: "i" } },
-            { last_name: { $regex: `^${escapeRegExp(last_name)}$`, $options: "i" } },
-            { dob: dob || null }
-          ] }
-      ]
-    }).lean();
-
-    if (duplicate) {
-      return res.status(400).json({ success: false, error: "Duplicate employee detected! Same email, contact, or name with DOB already exists." });
+    // duplicate check excluding current record
+    const orClauses = [];
+    if (email && email.trim()) orClauses.push({ email: email.trim() });
+    if (contact && contact.trim()) orClauses.push({ contact: contact.trim() });
+    if (first_name && last_name && dob) {
+      orClauses.push({
+        $and: [
+          { first_name: { $regex: `^${escapeRegExp(first_name)}$`, $options: "i" } },
+          { last_name: { $regex: `^${escapeRegExp(last_name)}$`, $options: "i" } },
+          { dob }
+        ]
+      });
     }
 
-    // Photo handling:
-    // - If new file uploaded (req.file) -> upload it and delete old server-uploaded image (if any)
-    // - Else if photoUrl === "__DELETE__" -> delete old server-uploaded image (if any) and clear photo fields
-    // - Else if photoUrl provided and it's different from existing.photo_url -> if existing was server-uploaded, delete old public_id
-    // - Else keep existing photo data
+    if (orClauses.length > 0) {
+      const duplicate = await Employee.findOne({
+        _id: { $ne: existing._id },
+        $or: orClauses
+      }).lean();
+      if (duplicate) {
+        return res.status(400).json({ success: false, error: "Duplicate employee detected! Same email, contact, or name with DOB already exists." });
+      }
+    }
+
+    // Photo handling
     let photo_url = existing.photo_url || null;
     let photo_public_id = existing.photo_public_id || null;
 
     if (req.file && req.file.buffer) {
-      // upload new image
       try {
         const result = await uploadBufferToCloudinary(req.file.buffer, req.file.originalname);
-        // delete previous server-uploaded image if present
         if (photo_public_id) {
           await deleteCloudinaryImage(photo_public_id);
         }
@@ -364,14 +359,12 @@ app.put("/api/employees/:employee_id", upload.single("photo"), async (req, res) 
         return res.status(500).json({ success: false, error: "Image upload failed", details: String(err) });
       }
     } else if (photoUrl === "__DELETE__") {
-      // explicit delete request from client
       if (photo_public_id) {
         await deleteCloudinaryImage(photo_public_id);
       }
       photo_public_id = null;
       photo_url = null;
     } else if (photoUrl) {
-      // client provided an external URL (or a Cloudinary URL already); if it differs from existing and previous was server-uploaded, remove old
       if (photoUrl !== photo_url) {
         if (photo_public_id) {
           await deleteCloudinaryImage(photo_public_id);
@@ -379,10 +372,8 @@ app.put("/api/employees/:employee_id", upload.single("photo"), async (req, res) 
         photo_public_id = null;
         photo_url = photoUrl;
       }
-      // else no change
     }
 
-    // Update fields (do not allow changing employee_id here)
     existing.first_name = first_name;
     existing.last_name = last_name;
     existing.address = address;
@@ -462,7 +453,7 @@ app.get("/api/employees", async (req, res) => {
   }
 });
 
-// Get single employee (with data URLs for QR + barcode)
+// Get single employee
 app.get("/api/employees/:employee_id", async (req, res) => {
   try {
     const eid = req.params.employee_id;
@@ -483,7 +474,7 @@ app.get("/api/employees/:employee_id", async (req, res) => {
   }
 });
 
-// Download QR (binary PNG) - Content-Disposition: attachment
+// Download QR (binary PNG)
 app.get("/api/employees/:employee_id/qr", async (req, res) => {
   try {
     const eid = req.params.employee_id;
@@ -502,7 +493,7 @@ app.get("/api/employees/:employee_id/qr", async (req, res) => {
   }
 });
 
-// Download Barcode (binary PNG) - Content-Disposition: attachment
+// Download Barcode (binary PNG)
 app.get("/api/employees/:employee_id/barcode", async (req, res) => {
   try {
     const eid = req.params.employee_id;
@@ -520,14 +511,13 @@ app.get("/api/employees/:employee_id/barcode", async (req, res) => {
   }
 });
 
-// Delete employee (and delete server-uploaded Cloudinary image if any)
+// Delete employee
 app.delete("/api/employees/:employee_id", async (req, res) => {
   try {
     const eid = req.params.employee_id;
     const row = await Employee.findOne({ employee_id: eid });
     if (!row) return res.status(404).json({ success: false, error: "Not found" });
 
-    // if we stored a photo_public_id (i.e. server uploaded), delete it from Cloudinary
     if (row.photo_public_id) {
       await deleteCloudinaryImage(row.photo_public_id);
     }
@@ -550,10 +540,14 @@ app.get("/verify/:employee_id", async (req, res) => {
 
     const photo_url = row.photo_url || "";
 
-   const html = `
+    // FIXED: define logoUrl and safeAddress used in template
+    const logoUrl = process.env.COMPANY_LOGO_URL || "";
+    const safeAddress = escapeHtml(row.address || "-");
+
+    const html = `
     <html>
     <head>
-      <title>${escapeHtml(row.first_name)} ${escapeHtml(row.last_name)} - ${COMPANY_CODE} Employee</title>
+      <title>${escapeHtml(row.first_name)} ${escapeHtml(row.last_name)} - ${escapeHtml(COMPANY_CODE)} Employee</title>
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <style>
         body { font-family: 'Inter', sans-serif; background: #F1EFEC; color: #030303; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; padding:16px; }
@@ -601,8 +595,17 @@ app.get("/verify/:employee_id", async (req, res) => {
   }
 });
 
-// Start
-app.listen(PORT, () => {
-  console.log(`✅ ID Card & QR Generator running on http://localhost:${PORT}`);
-});
-
+// ---------- Startup (connect then listen) ----------
+async function start() {
+  try {
+    await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+    console.log("✅ Connected to MongoDB");
+    app.listen(PORT, () => {
+      console.log(`✅ ID Card & QR Generator running on http://localhost:${PORT}`);
+    });
+  } catch (err) {
+    console.error("Failed to start server:", err);
+    process.exit(1);
+  }
+}
+start();
